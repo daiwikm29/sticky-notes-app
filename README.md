@@ -2,16 +2,25 @@
 
 A lightweight floating sticky note that lives in the corner of your screen. Press **F9** anywhere to show or hide it. Everything auto-saves, so nothing is lost when you hide the window or close the app.
 
-Three tabs in one small window:
+Starts with three tabs, but you can fully customize them:
 
 - **Scratch** — a free-form text pad for quick notes.
 - **To-Do** — a checklist you can add, check off, and delete.
 - **Tech** — a second checklist (handy for snippets, commands, or anything you want kept separate).
 
+### Custom tabs
+
+- **Add a tab:** click the **+** at the end of the tab row. You choose whether it's a *text pad* (free typing) or a *checklist* (add / check / delete items).
+- **Rename a tab:** double-click its name and type a new one.
+- **Delete a tab:** right-click it. You can't delete your last remaining tab.
+
+All tab names, types, and contents are saved automatically. If you're upgrading from an older version, your existing notes carry over with no setup.
+
 ## Features
 
 - Global **F9** hotkey to toggle the window from anywhere.
 - Frameless, always-on-top, dark UI.
+- **Customizable tabs** — add, rename, and delete tabs; each is either a text pad or a checklist.
 - Drag the title bar to move it; drag the corner grip (◢) to resize.
 - Window size and all content persist between launches.
 - Notes are saved per-user in your OS app-data folder, so multiple accounts on the same PC don't share notes.
