@@ -4,28 +4,41 @@ F9 Sticky Note
 A lightweight floating sticky note that lives in the corner of your screen.
 Press F9 anywhere to show or hide it. Everything auto-saves.
 
-HOW TO USE:
-1. Install the one dependency:  pip install -r requirements.txt
-2. Run it:                      python sticky_launcher.py
-3. Press F9 anywhere on your PC to show/hide the note window.
-4. Drag the title bar to move it; drag the corner grip to resize.
-5. Everything auto-saves. Nothing is lost when you hide it.
+FEATURES
+  - Custom tabs: click  ＋  to add a tab. When you add one you choose a name
+    and a type — a free-text "Notes pad" or a "Checklist" (to-do list).
+    Right-click any tab to Rename or Delete it.
+  - Settings gear  ⚙  in the top bar:
+      * Theme color — pick one color and the whole note becomes shades of it,
+        with the text automatically set to a contrasting color for visibility.
+      * Accent color and Text color (with "Auto" = auto-contrast) overrides.
+      * Text size — make the writing bigger or smaller.
+      * Text-background shade — lighten/darken the box behind the text while the
+        text itself stays fully solid and readable.
+  - Resize grip  ◢  in the bottom-right corner: drag to resize. Text wraps to
+    the window width automatically on both notes pads and checklists.
 
-RUN ON STARTUP (optional):
+HOW TO USE
+  1. Install the one dependency:  pip install -r requirements.txt
+  2. Run it:                      python sticky_launcher.py
+  3. Press F9 anywhere on your PC to show/hide the note window.
+
+RUN ON STARTUP (optional)
   Press Win+R -> type: shell:startup -> OK
-  Put a shortcut to this file in that folder.
+  Put a shortcut to this file (or the built .exe) in that folder.
 
-Your notes are stored in your personal app-data folder, so every user on the
-machine gets their own separate notes automatically. See get_data_dir() below.
+Your notes are saved to  ~/sticky_data.json  (your user folder), so they
+survive reboots and stay put even if this program is moved or replaced.
+Older save files (the {notes, todos, tech} format) are migrated automatically.
 """
 
 import os
 import sys
 import json
+import uuid
 import shutil
 import tempfile
 import threading
-from pathlib import Path
 
 # ── Dependency check ──────────────────────────────────────────────────────────
 # tkinter and json ship with Python. `keyboard` is the only external dependency,
@@ -43,226 +56,688 @@ except ImportError:
     sys.exit(1)
 
 import tkinter as tk
+from tkinter import simpledialog, messagebox, colorchooser
 
 
 # ── Data location & persistence ───────────────────────────────────────────────
-APP_NAME = "F9StickyNote"
+# Saved in the user's home folder so notes persist across reboots and are
+# independent of where this program lives. This is the same file the older
+# versions used, so existing notes are picked up automatically.
+SAVE_FILE = os.path.join(os.path.expanduser("~"), "sticky_data.json")
+
+FONT_FAMILY = "Courier New"
 
 
-def get_data_dir() -> Path:
-    """Return this user's app-data folder, creating it if needed.
-
-    Each OS user gets their own folder, so notes are never shared between
-    accounts and the file is kept out of the home directory's top level.
-    """
-    if os.name == "nt":  # Windows
-        base = Path(os.environ.get("APPDATA", Path.home()))
-    elif sys.platform == "darwin":  # macOS
-        base = Path.home() / "Library" / "Application Support"
-    else:  # Linux / other
-        base = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share"))
-    data_dir = base / APP_NAME
-    data_dir.mkdir(parents=True, exist_ok=True)
-    return data_dir
+def _new_id() -> str:
+    return uuid.uuid4().hex[:8]
 
 
-SAVE_FILE = get_data_dir() / "sticky_data.json"
+def _default_theme() -> dict:
+    return {"base": "#141414", "accent": "#f5c518", "text": None,
+            "font_size": 11, "box_shade": 50}
 
-DEFAULTS = {"notes": "", "todos": [], "tech": [], "win_w": 340, "win_h": 430}
+
+def _default_data() -> dict:
+    tabs = [
+        {"id": _new_id(), "name": "SCRATCH", "type": "text", "content": ""},
+        {"id": _new_id(), "name": "TO-DO", "type": "checklist", "items": []},
+    ]
+    return {
+        "version": 2,
+        "win_w": 340,
+        "win_h": 430,
+        "theme": _default_theme(),
+        "active": tabs[0]["id"],
+        "tabs": tabs,
+    }
+
+
+def _migrate_v1(old: dict) -> dict:
+    """Convert the old {notes, todos, tech} format into the tabbed v2 format,
+    preserving every bit of existing content."""
+    tabs = [
+        {"id": _new_id(), "name": "SCRATCH", "type": "text",
+         "content": old.get("notes", "") or ""},
+        {"id": _new_id(), "name": "TO-DO", "type": "checklist",
+         "items": list(old.get("todos", []) or [])},
+        {"id": _new_id(), "name": "TECH", "type": "checklist",
+         "items": list(old.get("tech", []) or [])},
+    ]
+    return {
+        "version": 2,
+        "win_w": old.get("win_w", 340),
+        "win_h": old.get("win_h", 430),
+        "theme": _default_theme(),
+        "active": tabs[0]["id"],
+        "tabs": tabs,
+    }
+
+
+def _normalize(data: dict) -> dict:
+    """Make sure a v2 save file has every key/shape we expect."""
+    data.setdefault("version", 2)
+    data.setdefault("win_w", 340)
+    data.setdefault("win_h", 430)
+    theme = data.setdefault("theme", _default_theme())
+    for k, v in _default_theme().items():
+        theme.setdefault(k, v)
+    if not isinstance(data.get("tabs"), list) or not data["tabs"]:
+        fresh = _default_data()
+        fresh["win_w"] = data.get("win_w", 340)
+        fresh["win_h"] = data.get("win_h", 430)
+        fresh["theme"] = theme
+        return fresh
+    for t in data["tabs"]:
+        t.setdefault("id", _new_id())
+        t.setdefault("name", "TAB")
+        if t.get("type") not in ("text", "checklist"):
+            t["type"] = "text"
+        if t["type"] == "checklist":
+            t.setdefault("items", [])
+        else:
+            t.setdefault("content", "")
+    ids = [t["id"] for t in data["tabs"]]
+    if data.get("active") not in ids:
+        data["active"] = ids[0]
+    return data
 
 
 def load() -> dict:
-    """Load saved data. If the file is missing, return defaults. If it is
-    corrupt, back it up so the user can recover it, then start fresh."""
-    if not SAVE_FILE.exists():
-        return dict(DEFAULTS)
+    """Load saved data, migrating/repairing as needed. Never silently destroys
+    an unreadable file — it is backed up first."""
+    if not os.path.exists(SAVE_FILE):
+        return _default_data()
     try:
         with open(SAVE_FILE, encoding="utf-8") as f:
             data = json.load(f)
     except (json.JSONDecodeError, OSError):
-        # Don't silently wipe the user's data — preserve the broken file.
-        backup = SAVE_FILE.with_suffix(".json.corrupt")
         try:
-            shutil.copy2(SAVE_FILE, backup)
+            shutil.copy2(SAVE_FILE, SAVE_FILE + ".corrupt")
             sys.stderr.write(
                 f"\nWarning: notes file was unreadable. A backup was saved to:\n"
-                f"    {backup}\nStarting with empty notes.\n\n"
+                f"    {SAVE_FILE}.corrupt\nStarting fresh.\n\n"
             )
         except OSError:
             pass
-        return dict(DEFAULTS)
+        return _default_data()
 
-    # Fill in any keys missing from older save files.
-    for key, default in DEFAULTS.items():
-        data.setdefault(key, default)
-    return data
+    if isinstance(data.get("tabs"), list):
+        return _normalize(data)
+    return _migrate_v1(data)  # old {notes, todos, tech} format
 
 
 def save(data: dict) -> None:
-    """Write data atomically: write to a temp file, then replace the real one.
-
-    A rename is atomic on every OS, so the notes file is never left half-written
-    if the program crashes or is force-quit mid-save.
-    """
+    """Write data atomically: temp file + rename, so the notes file is never
+    left half-written if the program crashes mid-save."""
     try:
-        fd, tmp_path = tempfile.mkstemp(
-            dir=str(SAVE_FILE.parent), prefix=".sticky_", suffix=".tmp"
+        fd, tmp = tempfile.mkstemp(
+            dir=os.path.dirname(SAVE_FILE) or ".", prefix=".sticky_", suffix=".tmp"
         )
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2)
             f.flush()
             os.fsync(f.fileno())
-        os.replace(tmp_path, SAVE_FILE)
+        os.replace(tmp, SAVE_FILE)
     except OSError as e:
         sys.stderr.write(f"\nWarning: could not save notes: {e}\n")
         try:
-            os.unlink(tmp_path)
+            os.unlink(tmp)
         except (OSError, NameError):
             pass
 
 
+# ── colour helpers ────────────────────────────────────────────────────────────
+def _hex_to_rgb(h):
+    h = h.lstrip("#")
+    if len(h) == 3:
+        h = "".join(c * 2 for c in h)
+    return tuple(int(h[i:i + 2], 16) for i in (0, 2, 4))
+
+
+def _rgb_to_hex(rgb):
+    return "#%02x%02x%02x" % tuple(max(0, min(255, int(round(c)))) for c in rgb)
+
+
+def _blend(c1, c2, t):
+    a, b = _hex_to_rgb(c1), _hex_to_rgb(c2)
+    return _rgb_to_hex(tuple(a[i] + (b[i] - a[i]) * t for i in range(3)))
+
+
+def _lum(h):
+    r, g, b = _hex_to_rgb(h)
+    return (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255.0
+
+
+def _contrast(h):
+    """A light or dark colour that stands out against `h`."""
+    return "#f4f4f4" if _lum(h) < 0.5 else "#161616"
+
+
+def _shade(base, t):
+    """Move `base` toward its contrasting end by fraction t (gives readable
+    'shades of' the base colour for both dark and light themes)."""
+    return _blend(base, _contrast(base), t)
+
+
 # ── UI ────────────────────────────────────────────────────────────────────────
 class StickyNote:
-    BG     = "#141414"
-    HEADER = "#1e1e1e"
-    ENTRY  = "#242424"
-    ACCENT = "#f5c518"
-    FG     = "#ececec"
-    DIM    = "#555"
-    DONE   = "#484848"
-
     MIN_W = 240
     MIN_H = 200
 
     def __init__(self):
-        self.data    = load()
+        self.data = load()
         self.visible = False
-        self.root    = tk.Tk()
-        self._build()
+        self._settings_win = None
+        self._popup_win = None
+        self._active_text = None              # tk.Text of the active notes tab (or None)
+        self._active_checklist_frame = None   # row container of the active checklist (or None)
+
+        self._apply_theme()
+
+        self.root = tk.Tk()
+        self.root.title("Sticky")
+        self.root.overrideredirect(True)
+        self.root.attributes("-topmost", True)
+        self.root.configure(bg=self.BG)
+        self.root.bind("<Escape>", lambda _: self._hide())
+        self.root.bind("<Configure>", self._on_root_configure)
+
+        self._build_chrome()
+        self._render_tabs()
+        self._render_active()
         self._position()
         self.root.withdraw()
-        # hotkey on background thread
         threading.Thread(target=self._hotkey_loop, daemon=True).start()
 
-    # ── build ──────────────────────────────────────────────────────────────
-    def _build(self):
-        r = self.root
-        r.title("Sticky")
-        r.overrideredirect(True)
-        r.attributes("-topmost", True)
-        r.attributes("-alpha", 0.96)
-        r.configure(bg=self.BG)
-        r.resizable(True, True)
-        r.bind("<Escape>", lambda _: self._hide())
+    # ── theme ─────────────────────────────────────────────────────────────────
+    def _theme(self) -> dict:
+        th = self.data.setdefault("theme", _default_theme())
+        for k, v in _default_theme().items():
+            th.setdefault(k, v)
+        return th
+
+    def _apply_theme(self):
+        """Compute the working palette + font size from the saved theme."""
+        th = self._theme()
+        base = th["base"]
+        text = th.get("text") or _contrast(base)
+        box = th.get("box_shade", 50)
+        self.font_size = int(th.get("font_size", 11))
+
+        self.ACCENT = th["accent"]
+        self.BG     = base
+        self.HEADER = _shade(base, 0.07)
+        self.SEP    = _shade(base, 0.14)
+        self.SEL    = _shade(base, 0.20)
+        self.ENTRY  = _shade(base, 0.02 + (box / 100.0) * 0.22)   # text-box background
+        self.FG     = text
+        self.DIM    = _blend(text, base, 0.55)
+        self.DONE   = _blend(text, base, 0.70)
+        self.CHK    = _blend(text, base, 0.40)
+        self.GRIP   = _blend(text, base, 0.45)
+
+    def _f(self, delta=0, bold=False):
+        size = max(7, self.font_size + delta)
+        return (FONT_FAMILY, size, "bold") if bold else (FONT_FAMILY, size)
+
+    def _retheme(self):
+        self._apply_theme()
+        self.root.configure(bg=self.BG)
+        self._build_chrome()
+        self._render_tabs()
+        self._render_active()
+        if self._settings_win and self._settings_win.winfo_exists():
+            self._build_settings_panel()
+
+    # ── small helpers ────────────────────────────────────────────────────────
+    def _tabs(self) -> list:
+        return self.data["tabs"]
+
+    def _active_tab(self) -> dict:
+        for t in self._tabs():
+            if t["id"] == self.data.get("active"):
+                return t
+        return self._tabs()[0]
+
+    # ── window chrome (header, tab strip, body, grip) ─────────────────────────
+    def _build_chrome(self):
+        if getattr(self, "_main", None) is not None and self._main.winfo_exists():
+            self._main.destroy()
+        self._main = tk.Frame(self.root, bg=self.BG)
+        self._main.pack(fill="both", expand=True)
+        m = self._main
 
         # header
-        hdr = tk.Frame(r, bg=self.HEADER, height=38)
+        hdr = tk.Frame(m, bg=self.HEADER, height=38)
         hdr.pack(fill="x"); hdr.pack_propagate(False)
 
-        tk.Label(hdr, text="●", fg=self.ACCENT, bg=self.HEADER,
-                 font=("Courier New", 13)).pack(side="left", padx=(10, 4))
-        tk.Label(hdr, text="notes", fg=self.FG, bg=self.HEADER,
-                 font=("Courier New", 11, "bold")).pack(side="left")
+        dot = tk.Label(hdr, text="●", fg=self.ACCENT, bg=self.HEADER,
+                       font=(FONT_FAMILY, 13))
+        dot.pack(side="left", padx=(10, 4))
+        title = tk.Label(hdr, text="notes", fg=self.FG, bg=self.HEADER,
+                         font=self._f(0, bold=True))
+        title.pack(side="left")
 
         close = tk.Label(hdr, text="✕", fg=self.DIM, bg=self.HEADER,
-                         font=("Courier New", 12), cursor="hand2")
-        close.pack(side="right", padx=10)
+                         font=(FONT_FAMILY, 12), cursor="hand2")
+        close.pack(side="right", padx=(4, 10))
         close.bind("<Button-1>", lambda _: self._hide())
+        self._hover(close)
 
-        for w in hdr.winfo_children():
+        gear = tk.Label(hdr, text="⚙", fg=self.DIM, bg=self.HEADER,
+                        font=("Segoe UI Symbol", 12), cursor="hand2")
+        gear.pack(side="right", padx=2)
+        gear.bind("<Button-1>", lambda _: self._toggle_settings())
+        self._hover(gear)
+
+        for w in (hdr, dot, title):
             w.bind("<ButtonPress-1>", self._drag_start)
-            w.bind("<B1-Motion>",     self._drag_move)
+            w.bind("<B1-Motion>", self._drag_move)
 
-        # tabs
-        tabs = tk.Frame(r, bg=self.BG)
-        tabs.pack(fill="x")
-        self._tab_labels = {}
-        for name, label in [("scratch", "SCRATCH"), ("todo", "TO-DO"), ("tech", "TECH")]:
-            lbl = tk.Label(tabs, text=label, fg=self.DIM, bg=self.BG,
-                           font=("Courier New", 9, "bold"), pady=6, cursor="hand2")
-            lbl.pack(side="left", padx=12)
-            lbl.bind("<Button-1>", lambda _, n=name: self._switch(n))
-            self._tab_labels[name] = lbl
+        # tab strip (contents rebuilt by _render_tabs)
+        self._tabbar = tk.Frame(m, bg=self.BG)
+        self._tabbar.pack(fill="x")
+        tk.Frame(m, bg=self.SEP, height=1).pack(fill="x")
 
-        tk.Frame(r, bg="#2a2a2a", height=1).pack(fill="x")
-
-        # body container holds the pages; resize grip sits over its corner
-        self._body = tk.Frame(r, bg=self.BG)
+        # body (contents rebuilt by _render_active)
+        self._body = tk.Frame(m, bg=self.BG)
         self._body.pack(fill="both", expand=True)
 
-        # pages
-        self._page_scratch = tk.Frame(self._body, bg=self.BG)
-        self._page_todo    = tk.Frame(self._body, bg=self.BG)
-        self._page_tech    = tk.Frame(self._body, bg=self.BG)
-
-        # scratch
-        self.txt = tk.Text(self._page_scratch, bg=self.ENTRY, fg=self.FG,
-                           insertbackground=self.ACCENT, font=("Courier New", 11),
-                           relief="flat", padx=10, pady=10, wrap="word",
-                           selectbackground="#3a3a3a", borderwidth=0)
-        self.txt.pack(fill="both", expand=True, padx=8, pady=8)
-        self.txt.insert("1.0", self.data.get("notes", ""))
-        self.txt.bind("<KeyRelease>", self._save_scratch)
-
-        # todo list — scrollable canvas
-        self._canvas, self._todo_frame, self.entry = self._build_checklist_page(
-            self._page_todo, self._add_todo
-        )
-
-        # tech list — scrollable canvas (same style as todo)
-        self._tech_canvas, self._tech_frame, self.tech_entry = self._build_checklist_page(
-            self._page_tech, self._add_tech
-        )
-
-        # resize grip — bottom-right corner, floats above everything
-        grip = tk.Label(r, text="◢", fg=self.DIM, bg=self.BG,
-                        font=("Courier New", 11), cursor="size_nw_se")
+        # resize grip — floats over the bottom-right corner
+        grip = tk.Label(m, text="◢", fg=self.GRIP, bg=self.BG,
+                        font=(FONT_FAMILY, 13), cursor="size_nw_se")
         grip.place(relx=1.0, rely=1.0, anchor="se", x=-2, y=-2)
-        grip.bind("<ButtonPress-1>",   self._resize_start)
-        grip.bind("<B1-Motion>",       self._resize_move)
+        grip.bind("<ButtonPress-1>", self._resize_start)
+        grip.bind("<B1-Motion>", self._resize_move)
         grip.bind("<ButtonRelease-1>", self._resize_end)
+        grip.bind("<Enter>", lambda _: grip.config(fg=self.ACCENT))
+        grip.bind("<Leave>", lambda _: grip.config(fg=self.GRIP))
 
-        self._render_todos()
-        self._render_tech()
-        self._switch("scratch")
+    def _hover(self, widget):
+        widget.bind("<Enter>", lambda _: widget.config(fg=self.ACCENT))
+        widget.bind("<Leave>", lambda _: widget.config(fg=self.DIM))
 
-        # rewrap on any resize of the window
-        r.bind("<Configure>", self._on_root_configure)
+    # ── tab strip ─────────────────────────────────────────────────────────────
+    def _render_tabs(self):
+        for w in self._tabbar.winfo_children():
+            w.destroy()
+        active = self.data.get("active")
+        for t in self._tabs():
+            lbl = tk.Label(self._tabbar, text=t["name"].upper(),
+                           fg=self.ACCENT if t["id"] == active else self.DIM,
+                           bg=self.BG, font=self._f(-2, bold=True),
+                           pady=6, cursor="hand2")
+            lbl.pack(side="left", padx=10)
+            lbl.bind("<Button-1>", lambda _, i=t["id"]: self._switch(i))
+            lbl.bind("<Button-3>", lambda e, i=t["id"]: self._tab_menu(e, i))
 
-    # ── reusable checklist page builder ───────────────────────────────────
-    def _build_checklist_page(self, page, add_fn):
-        canvas_container = tk.Frame(page, bg=self.BG)
-        canvas_container.pack(fill="both", expand=True, padx=8, pady=(8, 4))
+        plus = tk.Label(self._tabbar, text="＋", fg=self.DIM, bg=self.BG,
+                        font=self._f(1, bold=True), pady=4, cursor="hand2")
+        plus.pack(side="left", padx=(4, 0))
+        plus.bind("<Button-1>", lambda _: self._open_add_tab())
+        self._hover(plus)
 
-        canvas = tk.Canvas(canvas_container, bg=self.BG, highlightthickness=0, bd=0)
-        scrollbar = tk.Scrollbar(canvas_container, orient="vertical", command=canvas.yview)
-        canvas.configure(yscrollcommand=scrollbar.set)
+    def _switch(self, tab_id):
+        self.data["active"] = tab_id
+        save(self.data)
+        self._render_tabs()
+        self._render_active()
 
-        scrollbar.pack(side="right", fill="y")
+    def _tab_menu(self, event, tab_id):
+        m = tk.Menu(self.root, tearoff=0, bg=self.HEADER, fg=self.FG,
+                    activebackground=self.ACCENT, activeforeground=_contrast(self.ACCENT),
+                    bd=0)
+        m.add_command(label="Rename", command=lambda: self._rename_tab(tab_id))
+        m.add_command(label="Delete", command=lambda: self._delete_tab(tab_id))
+        try:
+            m.tk_popup(event.x_root, event.y_root)
+        finally:
+            m.grab_release()
+
+    # ── add / rename / delete tabs ────────────────────────────────────────────
+    def _open_add_tab(self):
+        if self._popup_win and self._popup_win.winfo_exists():
+            self._popup_win.lift()
+            return
+        win = tk.Toplevel(self.root)
+        self._popup_win = win
+        win.title("New tab")
+        win.configure(bg=self.HEADER)
+        win.attributes("-topmost", True)
+        win.resizable(False, False)
+        win.geometry("+%d+%d" % (self.root.winfo_rootx() + 30,
+                                 self.root.winfo_rooty() + 60))
+
+        tk.Label(win, text="Tab name", fg=self.FG, bg=self.HEADER,
+                 font=self._f(-1)).pack(anchor="w", padx=14, pady=(14, 2))
+        name_var = tk.StringVar()
+        ent = tk.Entry(win, textvariable=name_var, bg=self.ENTRY, fg=self.FG,
+                       insertbackground=self.ACCENT, font=self._f(0),
+                       relief="flat", bd=4, width=24)
+        ent.pack(padx=14)
+        ent.focus_set()
+
+        type_var = tk.StringVar(value="text")
+        tk.Label(win, text="Type", fg=self.FG, bg=self.HEADER,
+                 font=self._f(-1)).pack(anchor="w", padx=14, pady=(12, 2))
+        for val, label in (("text", "Notes pad (free text)"),
+                           ("checklist", "Checklist (to-do list)")):
+            tk.Radiobutton(win, text=label, variable=type_var, value=val,
+                           fg=self.FG, bg=self.HEADER, selectcolor=self.ENTRY,
+                           activebackground=self.HEADER, activeforeground=self.ACCENT,
+                           font=self._f(-1), anchor="w",
+                           highlightthickness=0, bd=0).pack(anchor="w", padx=14)
+
+        def create(_=None):
+            name = name_var.get().strip() or "TAB"
+            tab = {"id": _new_id(), "name": name, "type": type_var.get()}
+            if tab["type"] == "checklist":
+                tab["items"] = []
+            else:
+                tab["content"] = ""
+            self.data["tabs"].append(tab)
+            self.data["active"] = tab["id"]
+            save(self.data)
+            self._close_popup()
+            self._render_tabs()
+            self._render_active()
+
+        bar = tk.Frame(win, bg=self.HEADER)
+        bar.pack(fill="x", padx=14, pady=14)
+        self._button(bar, "Add", create).pack(side="right")
+        self._button(bar, "Cancel", lambda: self._close_popup(),
+                     fg=self.FG, bg=self.ENTRY).pack(side="right", padx=(0, 8))
+        ent.bind("<Return>", create)
+        win.bind("<Escape>", lambda _: self._close_popup())
+
+    def _rename_tab(self, tab_id):
+        tab = next((t for t in self._tabs() if t["id"] == tab_id), None)
+        if not tab:
+            return
+        self.root.attributes("-topmost", False)
+        name = simpledialog.askstring("Rename tab", "New name:",
+                                      initialvalue=tab["name"], parent=self.root)
+        self.root.attributes("-topmost", True)
+        if name and name.strip():
+            tab["name"] = name.strip()
+            save(self.data)
+            self._render_tabs()
+
+    def _delete_tab(self, tab_id):
+        tabs = self._tabs()
+        if len(tabs) <= 1:
+            self._info("You need at least one tab.")
+            return
+        idx = next((i for i, t in enumerate(tabs) if t["id"] == tab_id), None)
+        if idx is None:
+            return
+        tab = tabs[idx]
+        has_content = ((tab["type"] == "text" and tab.get("content", "").strip())
+                       or (tab["type"] == "checklist" and tab.get("items")))
+        if has_content and not self._confirm(f'Delete tab "{tab["name"]}" and everything in it?'):
+            return
+        tabs.pop(idx)
+        if self.data.get("active") == tab_id:
+            self.data["active"] = tabs[max(0, idx - 1)]["id"]
+        save(self.data)
+        self._render_tabs()
+        self._render_active()
+
+    # ── active page rendering ─────────────────────────────────────────────────
+    def _render_active(self):
+        for w in self._body.winfo_children():
+            w.destroy()
+        self._active_text = None
+        self._active_checklist_frame = None
+        tab = self._active_tab()
+        if tab["type"] == "checklist":
+            self._build_checklist(tab)
+        else:
+            self._build_text(tab)
+
+    def _build_text(self, tab):
+        txt = tk.Text(self._body, bg=self.ENTRY, fg=self.FG,
+                      insertbackground=self.ACCENT, font=self._f(0),
+                      relief="flat", padx=10, pady=10, wrap="word",
+                      selectbackground=self.SEL, borderwidth=0)
+        txt.pack(fill="both", expand=True, padx=8, pady=8)
+        txt.insert("1.0", tab.get("content", ""))
+
+        def _save(_=None):
+            tab["content"] = txt.get("1.0", "end-1c")
+            save(self.data)
+
+        txt.bind("<KeyRelease>", _save)
+        self._active_text = txt
+        txt.focus_set()
+
+    def _build_checklist(self, tab):
+        items = tab.setdefault("items", [])
+
+        container = tk.Frame(self._body, bg=self.BG)
+        container.pack(fill="both", expand=True, padx=8, pady=(8, 4))
+
+        canvas = tk.Canvas(container, bg=self.BG, highlightthickness=0, bd=0)
+        sb = tk.Scrollbar(container, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=sb.set)
+        sb.pack(side="right", fill="y")
         canvas.pack(side="left", fill="both", expand=True)
 
-        item_frame = tk.Frame(canvas, bg=self.BG)
-        canvas_window = canvas.create_window((0, 0), window=item_frame, anchor="nw")
+        frame = tk.Frame(canvas, bg=self.BG)
+        win = canvas.create_window((0, 0), window=frame, anchor="nw")
+        frame.bind("<Configure>", lambda _: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.bind("<Configure>", lambda e: canvas.itemconfig(win, width=e.width))
+        canvas.bind_all("<MouseWheel>",
+                        lambda e: canvas.winfo_exists() and
+                        canvas.yview_scroll(int(-1 * (e.delta / 120)), "units"))
 
-        item_frame.bind("<Configure>", lambda _, c=canvas: c.configure(scrollregion=c.bbox("all")))
-        canvas.bind("<Configure>", lambda e, c=canvas, w=canvas_window: c.itemconfig(w, width=e.width))
-        canvas.bind_all("<MouseWheel>", lambda e, c=canvas: c.yview_scroll(int(-1 * (e.delta / 120)), "units"))
-
-        # add-item bar
-        add = tk.Frame(page, bg=self.BG)
-        add.pack(fill="x", padx=8, pady=(0, 8))
-        entry = tk.Entry(add, bg=self.ENTRY, fg=self.FG,
-                         insertbackground=self.ACCENT,
-                         font=("Courier New", 10), relief="flat", bd=4)
+        addbar = tk.Frame(self._body, bg=self.BG)
+        addbar.pack(fill="x", padx=8, pady=(0, 8))
+        entry = tk.Entry(addbar, bg=self.ENTRY, fg=self.FG, insertbackground=self.ACCENT,
+                         font=self._f(-1), relief="flat", bd=4)
         entry.pack(side="left", fill="x", expand=True)
-        entry.bind("<Return>", add_fn)
-        plus = tk.Label(add, text="＋", fg=self.ACCENT, bg=self.BG,
-                        font=("Courier New", 14), cursor="hand2")
+        plus = tk.Label(addbar, text="＋", fg=self.ACCENT, bg=self.BG,
+                        font=self._f(3), cursor="hand2")
         plus.pack(side="right", padx=(8, 0))
-        plus.bind("<Button-1>", add_fn)
 
-        return canvas, item_frame, entry
+        self._active_checklist_frame = frame
 
+        def render():
+            for w in frame.winfo_children():
+                w.destroy()
+            wrap = max(80, self.root.winfo_width() - 80)
+            for i, item in enumerate(items):
+                row = tk.Frame(frame, bg=self.BG)
+                row.pack(fill="x", pady=2)
+                done = item.get("done", False)
+                ck = tk.Label(row, text="☑" if done else "☐",
+                              fg=self.ACCENT if done else self.CHK,
+                              bg=self.BG, font=self._f(2), cursor="hand2")
+                ck.pack(side="left", padx=(0, 6))
+                ck.bind("<Button-1>", lambda _, i=i: toggle(i))
+                lbl = tk.Label(row, text=item.get("text", ""),
+                               fg=self.DONE if done else self.FG, bg=self.BG,
+                               font=self._f(-1), anchor="w", justify="left",
+                               cursor="hand2", wraplength=wrap)
+                lbl.pack(side="left", fill="x", expand=True)
+                lbl.bind("<Button-1>", lambda _, i=i: toggle(i))
+                x = tk.Label(row, text="✕", fg=self.DIM, bg=self.BG,
+                             font=self._f(-1), cursor="hand2")
+                x.pack(side="right", padx=4)
+                x.bind("<Button-1>", lambda _, i=i: delete(i))
+
+        def add(_=None):
+            t = entry.get().strip()
+            if t:
+                items.append({"text": t, "done": False})
+                save(self.data)
+                entry.delete(0, "end")
+                render()
+
+        def toggle(i):
+            items[i]["done"] = not items[i].get("done", False)
+            save(self.data)
+            render()
+
+        def delete(i):
+            items.pop(i)
+            save(self.data)
+            render()
+
+        entry.bind("<Return>", add)
+        plus.bind("<Button-1>", add)
+        render()
+        entry.focus_set()
+
+    # ── settings ──────────────────────────────────────────────────────────────
+    def _toggle_settings(self):
+        if self._settings_win and self._settings_win.winfo_exists():
+            self._settings_win.destroy()
+            self._settings_win = None
+            return
+        win = tk.Toplevel(self.root)
+        self._settings_win = win
+        win.overrideredirect(True)
+        win.attributes("-topmost", True)
+        x = self.root.winfo_rootx() + self.root.winfo_width() + 8
+        y = self.root.winfo_rooty()
+        sw = self.root.winfo_screenwidth()
+        if x + 250 > sw:                      # not enough room on the right -> go left
+            x = max(0, self.root.winfo_rootx() - 250)
+        win.geometry("+%d+%d" % (max(0, x), max(0, y)))
+        self._build_settings_panel()
+        win.bind("<Escape>", lambda _: self._toggle_settings())
+
+    def _build_settings_panel(self):
+        win = self._settings_win
+        for w in win.winfo_children():
+            w.destroy()
+        win.configure(bg=self.HEADER, highlightbackground=self.SEP, highlightthickness=1)
+        th = self._theme()
+
+        bar = tk.Frame(win, bg=self.HEADER)
+        bar.pack(fill="x", padx=10, pady=(8, 4))
+        tl = tk.Label(bar, text="SETTINGS", fg=self.ACCENT, bg=self.HEADER,
+                      font=self._f(-2, bold=True))
+        tl.pack(side="left")
+        cl = tk.Label(bar, text="✕", fg=self.DIM, bg=self.HEADER,
+                      font=self._f(-1), cursor="hand2")
+        cl.pack(side="right")
+        cl.bind("<Button-1>", lambda _: self._toggle_settings())
+        for w in (bar, tl):
+            w.bind("<ButtonPress-1>", self._set_drag_start)
+            w.bind("<B1-Motion>", self._set_drag_move)
+
+        def row(label):
+            f = tk.Frame(win, bg=self.HEADER)
+            f.pack(fill="x", padx=12, pady=4)
+            tk.Label(f, text=label, fg=self.FG, bg=self.HEADER,
+                     font=self._f(-2)).pack(side="left")
+            return f
+
+        f = row("Theme color")
+        self._swatch(f, th["base"], lambda c: self._set_theme("base", c))
+
+        f = row("Accent color")
+        self._swatch(f, th["accent"], lambda c: self._set_theme("accent", c))
+
+        f = row("Text color")
+        self._swatch(f, th.get("text") or _contrast(th["base"]),
+                     lambda c: self._set_theme("text", c))
+        self._mini(f, "Auto", lambda: self._set_theme("text", None)).pack(side="right", padx=(0, 6))
+
+        f = row("Text size")
+        self._mini(f, "+", lambda: self._bump_font(1)).pack(side="right")
+        tk.Label(f, text=str(self.font_size), fg=self.ACCENT, bg=self.HEADER,
+                 font=self._f(-2, bold=True), width=3).pack(side="right")
+        self._mini(f, "–", lambda: self._bump_font(-1)).pack(side="right", padx=(0, 4))
+
+        tk.Label(win, text="Text background shade", fg=self.FG, bg=self.HEADER,
+                 font=self._f(-3)).pack(anchor="w", padx=12, pady=(8, 0))
+        sc = tk.Scale(win, from_=0, to=100, orient="horizontal", bg=self.HEADER,
+                      fg=self.FG, troughcolor=self.ENTRY, highlightthickness=0, bd=0,
+                      sliderrelief="flat", activebackground=self.ACCENT, length=210)
+        sc.set(int(th.get("box_shade", 50)))
+        sc.pack(padx=12)
+        sc.config(command=self._box_shade_live)
+        sc.bind("<ButtonRelease-1>", lambda _: self._set_theme("box_shade", int(float(sc.get()))))
+
+        self._mini(win, "Reset to defaults", self._reset_theme).pack(pady=(8, 12))
+
+    def _swatch(self, parent, color, on_pick):
+        sw = tk.Label(parent, text="    ", bg=color, cursor="hand2",
+                      highlightbackground=self.SEP, highlightthickness=1)
+        sw.pack(side="right")
+        sw.bind("<Button-1>", lambda _: self._pick_color(color, on_pick))
+
+    def _mini(self, parent, text, cmd):
+        b = tk.Label(parent, text=text, fg=self.FG, bg=self.ENTRY,
+                     font=self._f(-2, bold=True), cursor="hand2", padx=8, pady=2)
+        b.bind("<Button-1>", lambda _: cmd())
+        return b
+
+    def _pick_color(self, initial, on_pick):
+        parent = self._settings_win if (self._settings_win and self._settings_win.winfo_exists()) else self.root
+        self.root.attributes("-topmost", False)
+        if self._settings_win and self._settings_win.winfo_exists():
+            self._settings_win.attributes("-topmost", False)
+        try:
+            _, hexv = colorchooser.askcolor(color=initial, parent=parent, title="Pick a color")
+        finally:
+            self.root.attributes("-topmost", True)
+            if self._settings_win and self._settings_win.winfo_exists():
+                self._settings_win.attributes("-topmost", True)
+        if hexv:
+            on_pick(hexv)
+
+    def _set_theme(self, key, value):
+        self._theme()[key] = value
+        save(self.data)
+        self._retheme()
+
+    def _bump_font(self, d):
+        self._theme()["font_size"] = max(8, min(28, int(self._theme().get("font_size", 11)) + d))
+        save(self.data)
+        self._retheme()
+
+    def _box_shade_live(self, v):
+        # live preview while dragging; persisted on release via _set_theme
+        box = int(float(v))
+        self.ENTRY = _shade(self._theme()["base"], 0.02 + (box / 100.0) * 0.22)
+        if self._active_text is not None and self._active_text.winfo_exists():
+            self._active_text.config(bg=self.ENTRY)
+
+    def _reset_theme(self):
+        self.data["theme"] = _default_theme()
+        save(self.data)
+        self._retheme()
+
+    # ── styled "button" (Label, so it matches the dark theme) ─────────────────
+    def _button(self, parent, text, cmd, fg=None, bg=None):
+        bg = bg or self.ACCENT
+        fg = fg if fg is not None else _contrast(self.ACCENT)
+        b = tk.Label(parent, text=text, fg=fg, bg=bg,
+                     font=self._f(-1, bold=True), cursor="hand2", padx=14, pady=4)
+        b.bind("<Button-1>", lambda _: cmd())
+        return b
+
+    def _close_popup(self):
+        if self._popup_win and self._popup_win.winfo_exists():
+            self._popup_win.destroy()
+        self._popup_win = None
+
+    def _confirm(self, msg) -> bool:
+        self.root.attributes("-topmost", False)
+        ok = messagebox.askyesno("Sticky", msg, parent=self.root)
+        self.root.attributes("-topmost", True)
+        return ok
+
+    def _info(self, msg):
+        self.root.attributes("-topmost", False)
+        messagebox.showinfo("Sticky", msg, parent=self.root)
+        self.root.attributes("-topmost", True)
+
+    # ── geometry ──────────────────────────────────────────────────────────────
     def _position(self):
         w = self.data.get("win_w", 340)
         h = self.data.get("win_h", 430)
@@ -270,7 +745,6 @@ class StickyNote:
         sh = self.root.winfo_screenheight()
         self.root.geometry(f"{w}x{h}+{sw - w - 24}+{sh - h - 64}")
 
-    # ── resize handling ───────────────────────────────────────────────────
     def _resize_start(self, e):
         self._resize_origin = (e.x_root, e.y_root,
                                self.root.winfo_width(), self.root.winfo_height())
@@ -287,102 +761,20 @@ class StickyNote:
         save(self.data)
 
     def _on_root_configure(self, _e=None):
-        # recompute checklist text wraplength to fit current width
-        w = self.root.winfo_width()
-        wrap = max(80, w - 80)  # leave room for checkbox + delete icon + padding
-        self._rewrap(self._todo_frame, wrap)
-        self._rewrap(self._tech_frame, wrap)
+        # keep checklist text wrapped to the current window width
+        frame = self._active_checklist_frame
+        if frame is not None and frame.winfo_exists():
+            wrap = max(80, self.root.winfo_width() - 80)
+            for row in frame.winfo_children():
+                for child in row.winfo_children():
+                    if isinstance(child, tk.Label):
+                        try:
+                            if int(child.cget("wraplength")) > 0:
+                                child.config(wraplength=wrap)
+                        except (tk.TclError, ValueError):
+                            pass
 
-    def _rewrap(self, frame, wrap):
-        for row in frame.winfo_children():
-            for child in row.winfo_children():
-                if isinstance(child, tk.Label) and child.cget("wraplength"):
-                    child.config(wraplength=wrap)
-
-    # ── tabs ───────────────────────────────────────────────────────────────
-    def _switch(self, tab):
-        self._tab = tab
-        for name, lbl in self._tab_labels.items():
-            lbl.config(fg=self.ACCENT if name == tab else self.DIM)
-
-        self._page_scratch.pack_forget()
-        self._page_todo.pack_forget()
-        self._page_tech.pack_forget()
-
-        if tab == "scratch":
-            self._page_scratch.pack(fill="both", expand=True)
-            self.txt.focus_set()
-        elif tab == "todo":
-            self._page_todo.pack(fill="both", expand=True)
-            self.entry.focus_set()
-        else:
-            self._page_tech.pack(fill="both", expand=True)
-            self.tech_entry.focus_set()
-
-    # ── scratch ────────────────────────────────────────────────────────────
-    def _save_scratch(self, _=None):
-        self.data["notes"] = self.txt.get("1.0", "end-1c")
-        save(self.data)
-
-    # ── generic checklist logic ──────────────────────────────────────────
-    def _add_item(self, items_list, entry, render_fn):
-        t = entry.get().strip()
-        if t:
-            items_list.append({"text": t, "done": False})
-            save(self.data)
-            entry.delete(0, "end")
-            render_fn()
-
-    def _toggle_item(self, items_list, i, render_fn):
-        items_list[i]["done"] ^= True
-        save(self.data)
-        render_fn()
-
-    def _delete_item(self, items_list, i, render_fn):
-        items_list.pop(i)
-        save(self.data)
-        render_fn()
-
-    def _render_checklist(self, frame, items_list, render_fn):
-        for w in frame.winfo_children():
-            w.destroy()
-        wrap = max(80, self.root.winfo_width() - 80)
-        for i, item in enumerate(items_list):
-            row = tk.Frame(frame, bg=self.BG)
-            row.pack(fill="x", pady=2)
-            done = item["done"]
-            ck = tk.Label(row, text="☑" if done else "☐",
-                          fg=self.ACCENT if done else "#888",
-                          bg=self.BG, font=("Courier New", 13), cursor="hand2")
-            ck.pack(side="left", padx=(0, 6))
-            ck.bind("<Button-1>", lambda _, i=i: self._toggle_item(items_list, i, render_fn))
-            lbl = tk.Label(row, text=item["text"],
-                           fg=self.DONE if done else self.FG,
-                           bg=self.BG, font=("Courier New", 10),
-                           anchor="w", cursor="hand2",
-                           wraplength=wrap, justify="left")
-            lbl.pack(side="left", fill="x", expand=True)
-            lbl.bind("<Button-1>", lambda _, i=i: self._toggle_item(items_list, i, render_fn))
-            x = tk.Label(row, text="✕", fg=self.DIM, bg=self.BG,
-                         font=("Courier New", 10), cursor="hand2")
-            x.pack(side="right", padx=4)
-            x.bind("<Button-1>", lambda _, i=i: self._delete_item(items_list, i, render_fn))
-
-    # ── todos ──────────────────────────────────────────────────────────────
-    def _add_todo(self, _=None):
-        self._add_item(self.data["todos"], self.entry, self._render_todos)
-
-    def _render_todos(self):
-        self._render_checklist(self._todo_frame, self.data["todos"], self._render_todos)
-
-    # ── tech ───────────────────────────────────────────────────────────────
-    def _add_tech(self, _=None):
-        self._add_item(self.data["tech"], self.tech_entry, self._render_tech)
-
-    def _render_tech(self):
-        self._render_checklist(self._tech_frame, self.data["tech"], self._render_tech)
-
-    # ── drag (titlebar move) ──────────────────────────────────────────────
+    # ── drag (titlebar move) ──────────────────────────────────────────────────
     def _drag_start(self, e):
         self._dx = e.x_root - self.root.winfo_x()
         self._dy = e.y_root - self.root.winfo_y()
@@ -390,22 +782,37 @@ class StickyNote:
     def _drag_move(self, e):
         self.root.geometry(f"+{e.x_root - self._dx}+{e.y_root - self._dy}")
 
-    # ── show/hide ──────────────────────────────────────────────────────────
+    def _set_drag_start(self, e):
+        self._sdx = e.x_root - self._settings_win.winfo_x()
+        self._sdy = e.y_root - self._settings_win.winfo_y()
+
+    def _set_drag_move(self, e):
+        self._settings_win.geometry(f"+{e.x_root - self._sdx}+{e.y_root - self._sdy}")
+
+    # ── show / hide ───────────────────────────────────────────────────────────
     def _show(self):
         self.root.deiconify()
         self.root.lift()
+        self.root.attributes("-topmost", True)
         self.root.focus_force()
         self.visible = True
 
     def _hide(self):
-        self._save_scratch()
+        if self._active_text is not None and self._active_text.winfo_exists():
+            self._active_tab()["content"] = self._active_text.get("1.0", "end-1c")
+            save(self.data)
+        for w in (self._settings_win, self._popup_win):
+            if w and w.winfo_exists():
+                w.destroy()
+        self._settings_win = None
+        self._popup_win = None
         self.root.withdraw()
         self.visible = False
 
     def _toggle_window(self):
         self.root.after(0, self._hide if self.visible else self._show)
 
-    # ── hotkey loop ────────────────────────────────────────────────────────
+    # ── hotkey loop ───────────────────────────────────────────────────────────
     def _hotkey_loop(self):
         keyboard.add_hotkey("F9", self._toggle_window, suppress=False)
         keyboard.wait()
