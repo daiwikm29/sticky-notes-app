@@ -1,6 +1,8 @@
 # F9 Sticky Note
 
-A lightweight floating sticky note that lives in the corner of your screen. Press **F9** anywhere to show or hide it. Everything auto-saves, so nothing is lost when you hide the window or close the app.
+A lightweight floating sticky note that lives in the corner of your screen. Press **F9** anywhere to show or hide it (and if F9 is already taken on your PC, the app asks you to pick your own shortcut the first time you run it). Everything auto-saves, so nothing is lost when you hide the window or close the app.
+
+> **First launch:** the note pops up with a quick prompt to set your show/hide shortcut. Keep **F9**, tap a quick pick, or record any key combo you like. You can change it later anytime in **Settings ⚙ → Shortcut**.
 
 It comes with a couple of starter tabs — a notes pad and a checklist — and you can add, rename, delete, and fully restyle them.
 
@@ -21,11 +23,12 @@ Click the **⚙ gear** in the top-right to open Settings. Drag its title bar to 
 - **Text color** — set your own, or click **Auto** to let it auto-contrast with the theme.
 - **Text size** — make the writing bigger or smaller with **–** / **+**.
 - **Text background shade** — lighten or darken the box behind the text while the text itself stays fully solid and readable.
+- **Shortcut** — see your current show/hide shortcut and click **Change**. Hit **Record**, hold the keys you want (any combo, e.g. `Ctrl + Shift + S`), then click **Done** — or just tap a preset like F8, F10, Ctrl+Shift+S. Handy if F9 clashes with another app.
 - **Reset to defaults** — back to the original dark/gold look.
 
 ## Features
 
-- Global **F9** hotkey to toggle the window from anywhere.
+- Global **F9** hotkey to toggle the window from anywhere — **fully customizable** (set it on first launch or in Settings).
 - Frameless, always-on-top, dark UI (fully themeable in Settings).
 - **Customizable tabs** — add, rename, and delete tabs; each is either a notes pad or a checklist.
 - **Customizable look** — theme/accent/text colors, text size, and text-background shade.

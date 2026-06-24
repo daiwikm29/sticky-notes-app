@@ -4,6 +4,10 @@ F9 Sticky Note
 A lightweight floating sticky note that lives in the corner of your screen.
 Press F9 anywhere to show or hide it. Everything auto-saves.
 
+The first time you run it, a popup lets you pick your own show/hide shortcut
+(in case F9 is already used by another app). You can change it any time from
+Settings -> Shortcut.
+
 FEATURES
   - Custom tabs: click  ＋  to add a tab. When you add one you choose a name
     and a type — a free-text "Notes pad" or a "Checklist" (to-do list).
@@ -87,6 +91,8 @@ def _default_data() -> dict:
         "win_w": 340,
         "win_h": 430,
         "theme": _default_theme(),
+        "hotkey": "f9",
+        "hotkey_prompted": False,   # show the "pick your shortcut" popup on first run
         "active": tabs[0]["id"],
         "tabs": tabs,
     }
@@ -108,6 +114,8 @@ def _migrate_v1(old: dict) -> dict:
         "win_w": old.get("win_w", 340),
         "win_h": old.get("win_h", 430),
         "theme": _default_theme(),
+        "hotkey": "f9",
+        "hotkey_prompted": True,    # existing users already use F9 — don't nag them
         "active": tabs[0]["id"],
         "tabs": tabs,
     }
@@ -118,6 +126,8 @@ def _normalize(data: dict) -> dict:
     data.setdefault("version", 2)
     data.setdefault("win_w", 340)
     data.setdefault("win_h", 430)
+    data.setdefault("hotkey", "f9")
+    data.setdefault("hotkey_prompted", True)   # already-saved files = existing users
     theme = data.setdefault("theme", _default_theme())
     for k, v in _default_theme().items():
         theme.setdefault(k, v)
@@ -229,6 +239,13 @@ class StickyNote:
         self.visible = False
         self._settings_win = None
         self._popup_win = None
+        self._recording = False               # True while capturing a new shortcut
+        self._rec_binding = None               # tkinter <KeyPress> binding id while recording
+        self._rec_button = None               # the Record/Done toggle label
+        self._rec_binding_rel = None          # tkinter <KeyRelease> binding id while recording
+        self._rec_keys = []                   # unique keys captured for the current combo
+        self._rec_down = set()                # keysyms currently held (to ignore auto-repeat)
+        self._pending_hotkey = self.data.get("hotkey", "f9")
         self._active_text = None              # tk.Text of the active notes tab (or None)
         self._active_checklist_frame = None   # row container of the active checklist (or None)
 
@@ -248,6 +265,11 @@ class StickyNote:
         self._position()
         self.root.withdraw()
         threading.Thread(target=self._hotkey_loop, daemon=True).start()
+
+        # First launch: greet the user and let them pick their own shortcut in case
+        # F9 already does something else on their machine.
+        if not self.data.get("hotkey_prompted", True):
+            self.root.after(400, self._first_run)
 
     # ── theme ─────────────────────────────────────────────────────────────────
     def _theme(self) -> dict:
@@ -652,6 +674,12 @@ class StickyNote:
                  font=self._f(-2, bold=True), width=3).pack(side="right")
         self._mini(f, "–", lambda: self._bump_font(-1)).pack(side="right", padx=(0, 4))
 
+        f = row("Shortcut")
+        tk.Label(f, text=self._pretty_hotkey(self.data.get("hotkey", "f9")),
+                 fg=self.ACCENT, bg=self.HEADER,
+                 font=self._f(-2, bold=True)).pack(side="right")
+        self._mini(f, "Change", lambda: self._open_hotkey_setup()).pack(side="right", padx=(0, 8))
+
         tk.Label(win, text="Text background shade", fg=self.FG, bg=self.HEADER,
                  font=self._f(-3)).pack(anchor="w", padx=12, pady=(8, 0))
         sc = tk.Scale(win, from_=0, to=100, orient="horizontal", bg=self.HEADER,
@@ -711,6 +739,221 @@ class StickyNote:
         self.data["theme"] = _default_theme()
         save(self.data)
         self._retheme()
+
+    # ── keyboard shortcut setup ────────────────────────────────────────────────
+    def _pretty_hotkey(self, hk) -> str:
+        names = {"ctrl": "Ctrl", "control": "Ctrl", "alt": "Alt", "shift": "Shift",
+                 "windows": "Win", "win": "Win", "cmd": "Cmd", "esc": "Esc"}
+        steps = []
+        for step in str(hk).split(","):
+            parts = [p.strip() for p in step.split("+") if p.strip()]
+            if not parts:
+                continue
+            steps.append(" + ".join(
+                names.get(p.lower(), p.upper() if len(p) <= 2 else p.capitalize())
+                for p in parts))
+        return "  ,  ".join(steps) if steps else "—"
+
+    def _first_run(self):
+        """Greet a brand-new user and let them set their own shortcut right away."""
+        self._show()
+        self._open_hotkey_setup(first_run=True)
+
+    def _open_hotkey_setup(self, first_run=False):
+        if self._popup_win and self._popup_win.winfo_exists():
+            self._popup_win.lift()
+            return
+        self._pending_hotkey = self.data.get("hotkey", "f9")
+
+        win = tk.Toplevel(self.root)
+        self._popup_win = win
+        win.title("Keyboard shortcut")
+        win.configure(bg=self.HEADER, highlightbackground=self.SEP, highlightthickness=1)
+        win.attributes("-topmost", True)
+        win.resizable(False, False)
+        win.geometry("+%d+%d" % (self.root.winfo_rootx() + 24,
+                                 self.root.winfo_rooty() + 44))
+
+        tk.Label(win, text="Show / hide shortcut", fg=self.ACCENT, bg=self.HEADER,
+                 font=self._f(0, bold=True)).pack(anchor="w", padx=16, pady=(14, 2))
+        msg = ("Welcome! Press your shortcut anywhere to show or hide this note.\n"
+               "F9 is the default — if another app already uses it, pick your own."
+               if first_run else
+               "Choose the shortcut that shows and hides this note from anywhere.")
+        tk.Label(win, text=msg, fg=self.FG, bg=self.HEADER, font=self._f(-2),
+                 justify="left").pack(anchor="w", padx=16)
+
+        self._recording = False
+        self._rec_keys = []
+        self._rec_label = tk.Label(win, text=self._pretty_hotkey(self._pending_hotkey),
+                                   fg=self.FG, bg=self.ENTRY, font=self._f(1, bold=True),
+                                   padx=12, pady=10, width=22)
+        self._rec_label.pack(padx=16, pady=(12, 6))
+
+        self._rec_button = self._button(win, "Record a shortcut", self._toggle_record)
+        self._rec_button.pack(padx=16)
+        tk.Label(win, text="Tip: hold the keys you want together, then click Done.",
+                 fg=self.DIM, bg=self.HEADER, font=self._f(-3)).pack(anchor="w", padx=16, pady=(4, 0))
+
+        tk.Label(win, text="…or tap a quick pick:", fg=self.DIM, bg=self.HEADER,
+                 font=self._f(-3)).pack(anchor="w", padx=16, pady=(12, 2))
+        grid = tk.Frame(win, bg=self.HEADER)
+        grid.pack(padx=14, pady=(0, 2))
+        picks = ["f9", "f8", "f10", "ctrl+shift+s", "ctrl+alt+n", "pause"]
+        for idx, combo in enumerate(picks):
+            self._mini(grid, self._pretty_hotkey(combo),
+                       lambda c=combo: self._set_pending(c)
+                       ).grid(row=idx // 3, column=idx % 3, padx=3, pady=3, sticky="ew")
+
+        bar = tk.Frame(win, bg=self.HEADER)
+        bar.pack(fill="x", padx=16, pady=14)
+        self._button(bar, "Save", self._save_hotkey).pack(side="right")
+        keep_text = "Keep F9" if first_run else "Cancel"
+        self._button(bar, keep_text, self._cancel_hotkey,
+                     fg=self.FG, bg=self.ENTRY).pack(side="right", padx=(0, 8))
+        win.bind("<Escape>", lambda _: self._cancel_hotkey())
+        win.protocol("WM_DELETE_WINDOW", self._cancel_hotkey)
+
+    def _set_pending(self, combo):
+        self._pending_hotkey = combo
+        if self._rec_label and self._rec_label.winfo_exists():
+            self._rec_label.config(text=self._pretty_hotkey(combo), fg=self.FG)
+
+    # Keys that are modifiers only — we wait for a "real" key to finish the combo.
+    _MOD_KEYSYMS = {"Shift_L", "Shift_R", "Control_L", "Control_R", "Alt_L", "Alt_R",
+                    "Meta_L", "Meta_R", "Super_L", "Super_R", "Win_L", "Win_R",
+                    "Caps_Lock", "Num_Lock", "Mode_switch", "ISO_Level3_Shift"}
+    # tkinter keysym -> name the `keyboard` library understands.
+    _KEYSYM_MAP = {"space": "space", "Return": "enter", "Tab": "tab",
+                   "BackSpace": "backspace", "Delete": "delete", "Insert": "insert",
+                   "Home": "home", "End": "end", "Prior": "page up", "Next": "page down",
+                   "Up": "up", "Down": "down", "Left": "left", "Right": "right",
+                   "Pause": "pause", "Print": "print screen", "Menu": "menu"}
+    # modifier keysyms -> their canonical names (left/right collapse to one)
+    _MOD_CANON = {"Shift_L": "shift", "Shift_R": "shift",
+                  "Control_L": "ctrl", "Control_R": "ctrl",
+                  "Alt_L": "alt", "Alt_R": "alt",
+                  "Win_L": "windows", "Win_R": "windows",
+                  "Super_L": "windows", "Super_R": "windows",
+                  "Meta_L": "windows", "Meta_R": "windows"}
+    _MOD_ORDER = {"ctrl": 0, "alt": 1, "shift": 2, "windows": 3}
+
+    def _canon_key(self, keysym):
+        """tkinter keysym -> a single canonical key name (or None to ignore)."""
+        if keysym in self._MOD_CANON:
+            return self._MOD_CANON[keysym]
+        if keysym in ("Caps_Lock", "Num_Lock", "Mode_switch", "ISO_Level3_Shift"):
+            return None
+        return self._KEYSYM_MAP.get(keysym, keysym.lower())
+
+    def _format_chord(self):
+        """Build a 'ctrl+shift+r' style string from the captured keys, modifiers first."""
+        mods = sorted((k for k in self._rec_keys if k in self._MOD_ORDER),
+                      key=lambda k: self._MOD_ORDER[k])
+        others = [k for k in self._rec_keys if k not in self._MOD_ORDER]
+        return "+".join(mods + others)
+
+    def _toggle_record(self):
+        """One button: start recording, or finish (Done) if already recording."""
+        if self._recording:
+            self._stop_record()
+        else:
+            self._start_record()
+
+    def _start_record(self):
+        self._recording = True
+        self._rec_keys = []
+        self._rec_down = set()
+        if self._rec_label and self._rec_label.winfo_exists():
+            self._rec_label.config(text="Press keys…  (Esc cancels)", fg=self.ACCENT)
+        if self._rec_button and self._rec_button.winfo_exists():
+            self._rec_button.config(text="Done  ✓")
+        # Pause the live global shortcut so pressing it can't toggle the window mid-record.
+        try:
+            keyboard.clear_all_hotkeys()
+        except Exception:
+            pass
+        win = self._popup_win
+        if win and win.winfo_exists():
+            win.focus_force()
+            self._rec_binding = win.bind("<KeyPress>", self._on_record_key)
+            self._rec_binding_rel = win.bind("<KeyRelease>", self._on_record_release)
+
+    def _on_record_release(self, e):
+        # Key let go — allow it to be recorded again on a fresh press.
+        self._rec_down.discard(e.keysym)
+        return "break"
+
+    def _on_record_key(self, e):
+        if not self._recording:
+            return "break"
+        if e.keysym == "Escape":                 # cancel this recording
+            self._cancel_record()
+            return "break"
+        if e.keysym in self._rec_down:
+            return "break"                       # ignore OS auto-repeat while key is held
+        self._rec_down.add(e.keysym)
+        name = self._canon_key(e.keysym)
+        if name and name not in self._rec_keys:  # each key counts only once
+            self._rec_keys.append(name)
+            if self._rec_label and self._rec_label.winfo_exists():
+                self._rec_label.config(text=self._pretty_hotkey(self._format_chord()),
+                                       fg=self.ACCENT)
+        return "break"
+
+    def _end_record(self):
+        """Shared teardown for both finishing and cancelling a recording."""
+        win = self._popup_win
+        if win and win.winfo_exists():
+            if self._rec_binding:
+                try:
+                    win.unbind("<KeyPress>", self._rec_binding)
+                except Exception:
+                    pass
+            if self._rec_binding_rel:
+                try:
+                    win.unbind("<KeyRelease>", self._rec_binding_rel)
+                except Exception:
+                    pass
+        self._rec_binding = None
+        self._rec_binding_rel = None
+        self._rec_down = set()
+        self._rec_keys = []
+        self._recording = False
+        if self._rec_button and self._rec_button.winfo_exists():
+            self._rec_button.config(text="Record a shortcut")
+        self._apply_hotkey()        # restore the saved shortcut until they hit Save
+
+    def _stop_record(self):
+        combo = self._format_chord()
+        self._end_record()
+        self._set_pending(combo if combo else self._pending_hotkey)
+
+    def _cancel_record(self):
+        self._end_record()
+        self._set_pending(self._pending_hotkey)   # discard whatever was pressed
+
+    def _save_hotkey(self):
+        if self._recording:                 # finish an in-progress recording first
+            self._stop_record()
+        self.data["hotkey"] = (self._pending_hotkey or "f9").strip() or "f9"
+        self.data["hotkey_prompted"] = True
+        save(self.data)
+        self._apply_hotkey()
+        self._close_popup()
+        if self._settings_win and self._settings_win.winfo_exists():
+            self._build_settings_panel()
+        self._info("Shortcut set to  " + self._pretty_hotkey(self.data["hotkey"]) +
+                   "\nPress it anywhere to show or hide your notes.")
+
+    def _cancel_hotkey(self):
+        if self._recording:
+            self._end_record()
+        # Mark as handled either way so first-run users aren't asked again.
+        self.data["hotkey_prompted"] = True
+        save(self.data)
+        self._apply_hotkey()
+        self._close_popup()
 
     # ── styled "button" (Label, so it matches the dark theme) ─────────────────
     def _button(self, parent, text, cmd, fg=None, bg=None):
@@ -813,8 +1056,25 @@ class StickyNote:
         self.root.after(0, self._hide if self.visible else self._show)
 
     # ── hotkey loop ───────────────────────────────────────────────────────────
+    def _apply_hotkey(self):
+        """(Re)register the global show/hide shortcut from self.data['hotkey'].
+        Falls back to F9 if the saved combo is invalid."""
+        try:
+            keyboard.clear_all_hotkeys()
+        except Exception:
+            pass
+        hk = (self.data.get("hotkey") or "f9").strip() or "f9"
+        try:
+            keyboard.add_hotkey(hk, self._toggle_window, suppress=False)
+        except Exception:
+            try:
+                keyboard.add_hotkey("f9", self._toggle_window, suppress=False)
+                self.data["hotkey"] = "f9"
+            except Exception:
+                pass
+
     def _hotkey_loop(self):
-        keyboard.add_hotkey("F9", self._toggle_window, suppress=False)
+        self._apply_hotkey()
         keyboard.wait()
 
     def run(self):
